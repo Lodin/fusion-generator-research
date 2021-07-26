@@ -6,8 +6,17 @@ pub trait AST: Sized {
   fn kind(&self) -> ASTKind;
 }
 
-pub trait File {
-  fn codegen(&self) -> String;
+pub trait Module<'a> {
+  fn imports(&'a self) -> &'a Option<Rc<Vec<Import>>>;
+  fn imports_codegen(&'a self) -> Option<String> {
+    self.imports().as_ref().map(|list| {
+      list
+        .iter()
+        .map(|i| i.codegen())
+        .collect::<Vec<_>>()
+        .join("\n")
+    })
+  }
 }
 
 macro_rules! impl_ast {
@@ -33,6 +42,10 @@ impl Ident {
   pub fn new(name: &str) -> Self {
     Self(Rc::new(name.to_string()))
   }
+
+  pub fn codegen(&self) -> String {
+    (*self.0).clone()
+  }
 }
 
 #[derive(Clone)]
@@ -48,6 +61,14 @@ impl Import {
       symbol,
     }
   }
+
+  pub fn codegen(&self) -> String {
+    format!(
+      "import type {} from \"{}\";",
+      self.symbol.codegen(),
+      self.source
+    )
+  }
 }
 
 #[derive(Clone)]
@@ -55,6 +76,10 @@ pub struct Type {
   optional: bool,
   inner: Option<Rc<Vec<Type>>>,
   name: Ident,
+}
+
+pub struct RequiredType<'a> {
+  r#type: &'a Type,
 }
 
 impl Type {
@@ -69,6 +94,44 @@ impl Type {
   pub fn is_optional(&self) -> bool {
     self.optional
   }
+
+  pub fn codegen(&self) -> String {
+    let name = self.name.codegen();
+    let inner = self.inner_codegen();
+    let tail = if self.optional { " | undefined" } else { "" };
+
+    concat_string!(name, inner, tail)
+  }
+
+  pub fn required(&self) -> RequiredType {
+    RequiredType { r#type: self }
+  }
+
+  #[inline]
+  fn inner_codegen(&self) -> String {
+    self
+      .inner
+      .as_ref()
+      .map(|val| {
+        let types = val
+          .iter()
+          .map(|t| t.codegen())
+          .collect::<Vec<String>>()
+          .join(", ");
+
+        format!("<{}>", types)
+      })
+      .unwrap_or_default()
+  }
+}
+
+impl RequiredType<'_> {
+  pub fn codegen(&self) -> String {
+    let name = self.r#type.name.codegen();
+    let inner = self.r#type.inner_codegen();
+
+    concat_string!(name, inner)
+  }
 }
 
 #[derive(Clone)]
@@ -80,6 +143,17 @@ pub struct Field {
 impl Field {
   pub fn new(name: Ident, r#type: Type) -> Self {
     Self { name, r#type }
+  }
+
+  pub fn codegen(&self) -> String {
+    let tail = if self.r#type.is_optional() { "?" } else { "" };
+
+    format!(
+      "  {}{}: {};",
+      self.name.codegen(),
+      tail,
+      self.r#type.required().codegen()
+    )
   }
 }
 
@@ -95,6 +169,26 @@ impl Struct {
       fields: fields.map(|val| Rc::new(val)),
       name,
     }
+  }
+
+  pub fn codegen(&self) -> String {
+    let fields = self
+      .fields
+      .as_ref()
+      .map(|items| {
+        items
+          .iter()
+          .map(|f| f.codegen())
+          .collect::<Vec<String>>()
+          .join("\n")
+      })
+      .unwrap_or_default();
+
+    format!(
+      "export default interface {} {{\n{}\n}}",
+      self.name.codegen(),
+      fields
+    )
   }
 }
 
@@ -113,6 +207,37 @@ impl StructModule {
       name,
     }
   }
+
+  pub fn codegen(&self, header: Option<&str>) -> String {
+    let header = header
+      .map(|val| {
+        let sep = "\n";
+        concat_string!(val, sep)
+      })
+      .unwrap_or_default();
+
+    let imports = self
+      .imports_codegen()
+      .map(|i| {
+        let sep = "\n\n";
+        concat_string!(i, sep)
+      })
+      .unwrap_or_default();
+
+    let content = self
+      .content
+      .as_ref()
+      .map(|d| d.codegen())
+      .unwrap_or_default();
+
+    concat_string!(header, imports, content)
+  }
+}
+
+impl<'a> Module<'a> for StructModule {
+  fn imports(&'a self) -> &'a Option<Rc<Vec<Import>>> {
+    &self.imports
+  }
 }
 
 #[derive(Clone)]
@@ -124,6 +249,10 @@ pub struct Parameter {
 impl Parameter {
   pub fn new(name: Ident, r#type: Type) -> Self {
     Self { r#type, name }
+  }
+
+  pub fn codegen(&self) -> String {
+    format!("{}: {}", self.name.codegen(), self.r#type.codegen())
   }
 }
 
@@ -142,6 +271,45 @@ impl Method {
       return_type,
     }
   }
+
+  pub fn codegen(&self, endpoint_name: &Ident) -> String {
+    let name = self.name.codegen();
+    let parameters = self
+      .parameters
+      .as_ref()
+      .map(|parameters| {
+        parameters
+          .iter()
+          .map(|p| p.codegen())
+          .collect::<Vec<String>>()
+          .join(", ")
+      })
+      .unwrap_or_default();
+
+    let parameter_names = self
+      .parameters
+      .as_ref()
+      .map(|parameters| {
+        let list = parameters
+          .iter()
+          .map(|p| p.name.codegen())
+          .collect::<Vec<String>>()
+          .join(", ");
+
+        format!(", {{{}}}", list)
+      })
+      .unwrap_or_default();
+
+    format!(
+      "function _{}({}): Promise<{}> {{\n  client.call(\"{}\", \"{}\"{});\n}}",
+      name,
+      parameters,
+      self.return_type.codegen(),
+      endpoint_name.codegen(),
+      name,
+      parameter_names
+    )
+  }
 }
 
 #[derive(Clone)]
@@ -159,14 +327,76 @@ impl EndpointModule {
       name,
     }
   }
+
+  pub fn codegen(&self, header: Option<&str>) -> String {
+    let header = header
+      .map(|val| {
+        let sep = "\n";
+        concat_string!(val, sep)
+      })
+      .unwrap_or_default();
+
+    let imports = self
+      .imports_codegen()
+      .map(|val| {
+        let sep = "\n\n";
+        concat_string!(val, sep)
+      })
+      .unwrap_or_default();
+
+    let items = self
+      .content
+      .as_ref()
+      .map(|items| {
+        let combined: String = items
+          .iter()
+          .map(|i| i.codegen(&self.name))
+          .collect::<Vec<String>>()
+          .join("\n\n");
+
+        let sep = "\n\n";
+        concat_string!(combined, sep)
+      })
+      .unwrap_or_default();
+
+    let exports = self
+      .content
+      .as_ref()
+      .map(|items| {
+        let combined = items
+          .iter()
+          .map(|i| {
+            let name = i.name.codegen();
+            format!("  _{n} as {n},", n = name)
+          })
+          .collect::<Vec<String>>()
+          .join("\n");
+
+        format!("export {{\n{}\n}};", combined)
+      })
+      .unwrap_or_default();
+
+    concat_string!(header, imports, items, exports)
+  }
+}
+
+impl<'a> Module<'a> for EndpointModule {
+  fn imports(&'a self) -> &'a Option<Rc<Vec<Import>>> {
+    &self.imports
+  }
 }
 
 #[derive(Clone)]
 pub struct EnumVariant(Ident);
 
 impl EnumVariant {
-  fn new(name: Ident) -> Self {
+  pub fn new(name: Ident) -> Self {
     Self(name)
+  }
+
+  pub fn codegen(&self) -> String {
+    let name = self.0.codegen();
+    format!("{n} = '{n}'", n = name)
   }
 }
 
@@ -177,11 +407,31 @@ pub struct Enum {
 }
 
 impl Enum {
-  fn new(name: Ident, variants: Option<Vec<EnumVariant>>) -> Self {
+  pub fn new(name: Ident, variants: Option<Vec<EnumVariant>>) -> Self {
     Self {
       variants: variants.map(|val| Rc::new(val)),
       name,
     }
+  }
+
+  pub fn codegen(&self) -> String {
+    let variants = self
+      .variants
+      .as_ref()
+      .map(|items| {
+        items
+          .iter()
+          .map(|val| format!("  {},", val.codegen()))
+          .collect::<Vec<String>>()
+          .join("\n")
+      })
+      .unwrap_or_default();
+
+    format!(
+      "export default enum {} {{\n{}\n}}",
+      self.name.codegen(),
+      variants,
+    )
   }
 }
 
@@ -192,8 +442,26 @@ pub struct EnumModule {
 }
 
 impl EnumModule {
-  fn new(name: Ident, content: Option<Enum>) -> Self {
+  pub fn new(name: Ident, content: Option<Enum>) -> Self {
     Self { content, name }
+  }
+
+  pub fn codegen(&self, header: Option<&str>) -> String {
+    let header = header
+      .map(|val| {
+        let sep = "\n";
+        concat_string!(val, sep)
+      })
+      .unwrap_or_default();
+
+    let content = self
+      .content
+      .as_ref()
+      .map(|val| val.codegen())
+      .unwrap_or_default();
+
+    let sep = "\n";
+    concat_string!(header, sep, content)
   }
 }
 
@@ -212,261 +480,11 @@ impl_ast!(
   EnumModule
 );
 
-enum CodegenOpts<'a> {
-  TypeWithoutOptional(bool),
-  ModuleHeader(&'a str),
-  MethodEndpointName(&'a Ident),
-  None,
-}
-
-#[inline]
-fn codegen_imports(imports: &Option<Rc<Vec<Import>>>) -> Option<String> {
-  imports.as_ref().map(|list| {
-    list
-      .iter()
-      .map(|i| codegen(i, CodegenOpts::None))
-      .collect::<Vec<String>>()
-      .join("\n")
-  })
-}
-
-#[inline]
-fn codegen<T: AST>(ast: &T, opts: CodegenOpts) -> String {
-  match ast.kind() {
-    ASTKind::Ident(node) => (*node.0).clone(),
-    ASTKind::Import(node) => {
-      format!(
-        "import type {} from \"{}\";",
-        codegen(&node.symbol, CodegenOpts::None),
-        node.source
-      )
-    }
-    ASTKind::Type(node) => {
-      let without_optional = match opts {
-        CodegenOpts::TypeWithoutOptional(val) => val,
-        _ => false,
-      };
-
-      let name = codegen(&node.name, CodegenOpts::None);
-
-      let tail = if !without_optional && node.optional {
-        " | undefined"
-      } else {
-        ""
-      };
-
-      let inner = node
-        .inner
-        .as_ref()
-        .map(|val| {
-          let types = val
-            .iter()
-            .map(|t| codegen(t, CodegenOpts::None))
-            .collect::<Vec<String>>()
-            .join(", ");
-
-          format!("<{}>", types)
-        })
-        .unwrap_or_default();
-
-      concat_string!(name, inner, tail)
-    }
-    ASTKind::Field(node) => {
-      let tail = if node.r#type.is_optional() { "?" } else { "" };
-
-      format!(
-        "  {}{}: {};",
-        codegen(&node.name, CodegenOpts::None),
-        tail,
-        codegen(&node.r#type, CodegenOpts::TypeWithoutOptional(true))
-      )
-    }
-    ASTKind::Struct(node) => {
-      let fields: Option<Vec<String>> = node
-        .fields
-        .as_ref()
-        .map(|list| list.iter().map(|f| codegen(f, CodegenOpts::None)).collect());
-
-      format!(
-        "export default interface {} {{\n{}\n}}",
-        codegen(&node.name, CodegenOpts::None),
-        fields.map(|list| list.join("\n")).unwrap_or_default()
-      )
-    }
-    ASTKind::StructModule(node) => {
-      let header = match opts {
-        CodegenOpts::ModuleHeader(val) => Some(val),
-        _ => None,
-      }
-      .map(|val| {
-        let sep = "\n";
-        concat_string!(val, sep)
-      })
-      .unwrap_or_default();
-
-      let imports = codegen_imports(&node.imports)
-        .map(|i| {
-          let sep = "\n\n";
-          concat_string!(i, sep)
-        })
-        .unwrap_or_default();
-
-      let content = node
-        .content
-        .as_ref()
-        .map(|d| codegen(d, CodegenOpts::None))
-        .unwrap_or_default();
-
-      concat_string!(header, imports, content)
-    }
-    ASTKind::Parameter(node) => {
-      format!(
-        "{}: {}",
-        codegen(&node.name, CodegenOpts::None),
-        codegen(&node.r#type, CodegenOpts::None)
-      )
-    }
-    ASTKind::Method(node) => {
-      let endpoint_name = match opts {
-        CodegenOpts::MethodEndpointName(name) => name,
-        _ => panic!("No value for CodegenOpts::MethodEndpointName"),
-      };
-
-      let name = codegen(&node.name, CodegenOpts::None);
-      let parameters: Option<Vec<String>> = node.parameters.as_ref().map(|parameters| {
-        parameters
-          .iter()
-          .map(|p| codegen(p, CodegenOpts::None))
-          .collect()
-      });
-
-      let parameter_names: Option<Vec<String>> = node.parameters.as_ref().map(|parameters| {
-        parameters
-          .iter()
-          .map(|p| codegen(&p.name, CodegenOpts::None))
-          .collect()
-      });
-
-      format!(
-        "function _{}({}): Promise<{}> {{\n  client.call(\"{}\", \"{}\"{});\n}}",
-        name,
-        parameters
-          .as_ref()
-          .map(|list| list.join(", "))
-          .unwrap_or_default(),
-        codegen(&node.return_type, CodegenOpts::None),
-        codegen(endpoint_name, CodegenOpts::None),
-        name,
-        parameter_names
-          .as_ref()
-          .map(|list| format!(", {{{}}}", list.join(", ")))
-          .unwrap_or_default()
-      )
-    }
-    ASTKind::EndpointModule(node) => {
-      let header = match opts {
-        CodegenOpts::ModuleHeader(val) => Some(val),
-        _ => None,
-      }
-      .map(|val| {
-        let sep = "\n";
-        concat_string!(val, sep)
-      })
-      .unwrap_or_default();
-
-      let imports = codegen_imports(&node.imports)
-        .map(|val| {
-          let sep = "\n\n";
-          concat_string!(val, sep)
-        })
-        .unwrap_or_default();
-
-      let items = node
-        .content
-        .as_ref()
-        .map(|items| {
-          let combined: String = items
-            .iter()
-            .map(|i| codegen(i, CodegenOpts::MethodEndpointName(&node.name)))
-            .collect::<Vec<String>>()
-            .join("\n\n");
-
-          let sep = "\n\n";
-
-          concat_string!(combined, sep)
-        })
-        .unwrap_or_default();
-
-      let exports = node
-        .content
-        .as_ref()
-        .map(|items| {
-          let combined = items
-            .iter()
-            .map(|i| {
-              let name = codegen(&i.name, CodegenOpts::None);
-              format!("  _{n} as {n},", n = name)
-            })
-            .collect::<Vec<String>>()
-            .join("\n");
-
-          format!("export {{\n{}\n}};", combined)
-        })
-        .unwrap_or_default();
-
-      concat_string!(header, imports, items, exports)
-    }
-    ASTKind::EnumVariant(node) => {
-      let name = codegen(&node.0, CodegenOpts::None);
-      format!("{n} = '{n}'", n = name)
-    }
-    ASTKind::Enum(node) => {
-      let variants = node
-        .variants
-        .as_ref()
-        .map(|items| {
-          items
-            .iter()
-            .map(|val| format!("  {},", codegen(val, CodegenOpts::None)))
-            .collect::<Vec<String>>()
-            .join("\n")
-        })
-        .unwrap_or_default();
-
-      format!(
-        "export default enum {} {{\n{}\n}}",
-        codegen(&node.name, CodegenOpts::None),
-        variants,
-      )
-    }
-    ASTKind::EnumModule(node) => {
-      let header = match opts {
-        CodegenOpts::ModuleHeader(val) => Some(val),
-        _ => None,
-      }
-      .map(|val| {
-        let sep = "\n";
-        concat_string!(val, sep)
-      })
-      .unwrap_or_default();
-
-      let content = node
-        .content
-        .as_ref()
-        .map(|val| codegen(val, CodegenOpts::None))
-        .unwrap_or_default();
-
-      let sep = "\n";
-      concat_string!(header, sep, content)
-    }
-  }
-}
-
 #[cfg(test)]
 mod tests {
-  use crate::ts_a::{
-    codegen, CodegenOpts, EndpointModule, Enum, EnumModule, EnumVariant, Field, Ident, Import,
-    Method, Parameter, Struct, StructModule, Type,
+  use crate::ts::{
+    EndpointModule, Enum, EnumModule, EnumVariant, Field, Ident, Import, Method, Parameter, Struct,
+    StructModule, Type,
   };
 
   #[test]
@@ -493,10 +511,7 @@ mod tests {
       )),
     );
 
-    let code = codegen(
-      &struct_mod,
-      CodegenOpts::ModuleHeader("/**\n * Some header\n */"),
-    );
+    let code = struct_mod.codegen(Some("/**\n * Some header\n */"));
     assert_eq!(
       code,
       "/**
@@ -566,10 +581,7 @@ export default interface ChartSeries {
       ]),
     );
 
-    let code = codegen(
-      &endpoint_mod,
-      CodegenOpts::ModuleHeader("/**\n * Some header\n */"),
-    );
+    let code = endpoint_mod.codegen(Some("/**\n * Some header\n */"));
     assert_eq!(
       code,
       "/**
@@ -609,10 +621,7 @@ export {
       )),
     );
 
-    let code = codegen(
-      &enum_mod,
-      CodegenOpts::ModuleHeader("/**\n * Some header\n */"),
-    );
+    let code = enum_mod.codegen(Some("/**\n * Some header\n */"));
 
     assert_eq!(
       code,
