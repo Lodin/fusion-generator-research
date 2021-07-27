@@ -6,19 +6,6 @@ pub trait AST: Sized {
   fn kind(&self) -> ASTKind;
 }
 
-pub trait Module<'a> {
-  fn imports(&'a self) -> &'a Option<Rc<Vec<Import>>>;
-  fn imports_codegen(&'a self) -> Option<String> {
-    self.imports().as_ref().map(|list| {
-      list
-        .iter()
-        .map(|i| i.codegen())
-        .collect::<Vec<_>>()
-        .join("\n")
-    })
-  }
-}
-
 macro_rules! impl_ast {
   ($($kind:tt),+) => {
     pub enum ASTKind<'a> {
@@ -33,6 +20,17 @@ macro_rules! impl_ast {
       }
     )+
   };
+}
+
+#[inline]
+fn imports_codegen(imports: &Option<Rc<Vec<Import>>>) -> Option<String> {
+  imports.as_ref().map(|list| {
+    list
+      .iter()
+      .map(|i| i.codegen())
+      .collect::<Vec<_>>()
+      .join("\n")
+  })
 }
 
 #[derive(Clone)]
@@ -216,8 +214,7 @@ impl StructModule {
       })
       .unwrap_or_default();
 
-    let imports = self
-      .imports_codegen()
+    let imports = imports_codegen(&self.imports)
       .map(|i| {
         let sep = "\n\n";
         concat_string!(i, sep)
@@ -231,12 +228,6 @@ impl StructModule {
       .unwrap_or_default();
 
     concat_string!(header, imports, content)
-  }
-}
-
-impl<'a> Module<'a> for StructModule {
-  fn imports(&'a self) -> &'a Option<Rc<Vec<Import>>> {
-    &self.imports
   }
 }
 
@@ -336,8 +327,7 @@ impl EndpointModule {
       })
       .unwrap_or_default();
 
-    let imports = self
-      .imports_codegen()
+    let imports = imports_codegen(&self.imports)
       .map(|val| {
         let sep = "\n\n";
         concat_string!(val, sep)
@@ -377,12 +367,6 @@ impl EndpointModule {
       .unwrap_or_default();
 
     concat_string!(header, imports, items, exports)
-  }
-}
-
-impl<'a> Module<'a> for EndpointModule {
-  fn imports(&'a self) -> &'a Option<Rc<Vec<Import>>> {
-    &self.imports
   }
 }
 
