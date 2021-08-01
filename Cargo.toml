@@ -1,5 +1,6 @@
 [workspace]
 members = [
   "fusion-generator-core",
-  "fusion-generator-java"
+  "fusion-generator-java",
+  "fusion-generator-jvm"
 ]

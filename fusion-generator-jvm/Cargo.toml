@@ -1,0 +1,14 @@
+[package]
+name = "fusion-generator-jvm"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+clap = "3.0.0-beta.2"
+coffer = { git = "https://gitlab.com/fee1-dead/coffer.git", branch = "master" }
+concat-string = "^1.0.1"
+fusion-generator-core = { path = "../fusion-generator-core" }
+itertools = "0.10.1"
+thiserror = "1.0.26"
+walkdir = "2.3.2"
+zip = "0.5.13"
